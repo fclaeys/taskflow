@@ -1,0 +1,155 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**"]
+
+permissions:
+  contents: read
+
+env:
+  COVERAGE_MIN: 75
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  api:
+    name: api
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
+    defaults:
+      run:
+        working-directory: api
+    steps:
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+
+      - name: Installer Node.js ${{ matrix.node }} et activer le cache npm
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: api/package-lock.json
+
+      - name: Installer les dépendances
+        run: npm ci
+
+      - name: Vérifier le linter (ESLint)
+        run: npm run lint
+
+      - name: Vérifier le formatage (Prettier)
+        run: npm run format:check
+
+      - name: Lancer les tests unitaires et la couverture
+        run: npm run test:coverage
+
+      - name: Vérifier le seuil de couverture et générer le résumé
+        run: |
+          LINES=$(jq -r '.total.lines.pct' coverage/coverage-summary.json)
+          STMTS=$(jq -r '.total.statements.pct' coverage/coverage-summary.json)
+          FUNCS=$(jq -r '.total.functions.pct' coverage/coverage-summary.json)
+          BRANCHES=$(jq -r '.total.branches.pct' coverage/coverage-summary.json)
+
+          {
+            echo "### Couverture de l'API (Node ${{ matrix.node }})"
+            echo "| Métrique | Couverture | Seuil |"
+            echo "|---|---|---|"
+            echo "| Lignes | ${LINES} % | ${COVERAGE_MIN} % |"
+            echo "| Instructions | ${STMTS} % | - |"
+            echo "| Fonctions | ${FUNCS} % | - |"
+            echo "| Branches | ${BRANCHES} % | - |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if awk -v p="$LINES" -v min="$COVERAGE_MIN" 'BEGIN { exit !(p < min) }'; then
+            echo "::error title=Couverture insuffisante::lignes ${LINES} % < ${COVERAGE_MIN} %"
+            exit 1
+          fi
+
+  api-integration:
+    name: api-integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: taskflow
+          POSTGRES_PASSWORD: taskflow
+          POSTGRES_DB: taskflow
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U taskflow -d taskflow"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://taskflow:taskflow@localhost:5432/taskflow
+    defaults:
+      run:
+        working-directory: api
+    steps:
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+
+      - name: Installer Node.js 20 et activer le cache npm
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: api/package-lock.json
+
+      - name: Installer les dépendances
+        run: npm ci
+
+      - name: Lancer les tests d'intégration PostgreSQL
+        run: npm run test:int
+
+  front:
+    name: front
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: front
+    steps:
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+
+      - name: Installer Node.js 20 et activer le cache npm
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: front/package-lock.json
+
+      - name: Installer les dépendances
+        run: npm ci
+
+      - name: Vérifier le linter (ESLint)
+        run: npm run lint
+
+      - name: Vérifier le formatage (Prettier)
+        run: npm run format:check
+
+      - name: Lancer les tests unitaires
+        run: npm run test:coverage
+
+      - name: Construire l'application (Vite)
+        run: npm run build
+
+      - name: Sauvegarder l'artefact front-dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: front-dist
+          path: front/dist/
+          retention-days: 7
+          if-no-files-found: error
